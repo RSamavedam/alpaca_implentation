@@ -1,2 +1,2 @@
 # alpaca_implentation
-Relevant implemtation is in trainer.py
+Relevant implementation is in trainer.py
