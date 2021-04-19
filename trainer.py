@@ -11,6 +11,7 @@ class ALPaCA(torch.nn.Module):
 
         self.K_0 = torch.nn.Parameter(torch.zeros(hidden_dim, 1))
         self.L_0 = torch.nn.Parameter(torch.zeros(hidden_dim, hidden_dim))
+        self.noise_parameter = 0.01
         #set A_0 = torch.matmul(self.L_0, self.L_0.T)
         #This enforces PSD
 
@@ -35,6 +36,7 @@ class ALPaCA(torch.nn.Module):
         factor = torch.matmul(context_phi.transpose(1, 2), Y_context) + torch.matmul(A_0, self.K_0) #breaks up calculation of K_context
         K_context = torch.matmul(torch.inverse(A_context), factor) #(n_batches, hidden_dim, hidden_dim) x (n_batches, hidden_dim, 1) = (n_batches, hidden_dim, 1)
         sigma_x = 1 + torch.matmul(phi_x, torch.matmul(torch.inverse(A_context), phi_x.transpose(1, 2))) #(n_batches, len_train_batch, len_train_batch)
+        sigma_x = sigma_x * self.noise_parameter
 
         #calculate predictions for backprop examples
         preds = torch.matmul(phi_x, K_context) #preds is (n_batches, len_train_batch, 1)
@@ -53,6 +55,7 @@ class ALPaCA(torch.nn.Module):
         K = torch.matmul(self.A_inverse, self.Q)
         pred = torch.matmul(K.transpose(0, 1), phi_x)
         sigma = 1 + torch.matmul(phi_x.transpose(0, 1), torch.matmul(self.A_inverse, phi_x))
+        sigma = sigma * self.noise_parameter
         if update:
             if y is None:
                 raise Exception("When doing online updates, you must specify y")
@@ -86,14 +89,15 @@ if __name__ == "__main__":
     x_train = []
     y_train = []
     n_batches = 6
-    len_context = 100
+    len_context = 15
     len_train_batch = 1 #in practice, exceeding 4 results in sigma_x being singular (should I use identity matrix instead of 1?)
     #probably is a better way to implement next 9 lines but oh well
+    phases = np.linspace(0, 1, n_batches)
     for i in range(1, n_batches+1):
-        X_context.append(torch.linspace(0, 6.28, len_context))
-        Y_context.append(torch.sin(i * torch.linspace(0, 6.28, len_context)))
-        x_train.append(torch.linspace(6.28, 9.5, len_train_batch))
-        y_train.append(torch.sin(i * torch.linspace(6.28, 9.5, len_train_batch)))
+        X_context.append(torch.linspace(0, 1, len_context))
+        Y_context.append(torch.sin(2 * np.pi * torch.linspace(0, 1, len_context) + np.pi*phases[i-1]))
+        x_train.append(torch.linspace(1, 1.2, len_train_batch))
+        y_train.append(torch.sin(2 * np.pi * torch.linspace(1, 1.2, len_train_batch) + np.pi*phases[i-1]))
     X_context = torch.stack(X_context).unsqueeze(2)
     Y_context = torch.stack(Y_context).unsqueeze(2)
     x_train = torch.stack(x_train).unsqueeze(2)
@@ -152,7 +156,7 @@ if __name__ == "__main__":
     #Online Part
     #First want to see what the model returns when predicting over the interval (what the offline posterior parameters return)
     model.start_online()
-    x = np.linspace(0, 6.28, 100)
+    x = np.linspace(0, 1, 100)
     y_top = []
     y = []
     y_bottom = []
@@ -184,8 +188,8 @@ if __name__ == "__main__":
 
 
     #Now want to fit to a specific sinusoid with our meta learning prior
-    x = np.linspace(0, 6.28, 100)
-    y = np.sin(x)
+    x = np.linspace(0, 1, 100)
+    y = np.sin(2*np.pi*x + 0.5*np.pi)
     y_pred_top = []
     y_pred = []
     y_pred_bottom = []
@@ -193,15 +197,34 @@ if __name__ == "__main__":
         pred, sigma = model.online(torch.tensor(x[i:i+1]).float(), update=True, y=torch.tensor(y[i:i+1]).float())
         u = pred.detach().numpy()[0][0]
         v = np.sqrt(sigma.detach().numpy()[0][0]) #standard deviation
-        print(v)
+        #print(v)
         y_pred.append(u)
         y_pred_bottom.append(u - 2*v)
         y_pred_top.append(u + 2*v)
 
-    #Plot predictions without confidence interval (easier to see)
+    y_pred = []
+    y_pred_bottom = []
+    y_pred_top = []
+    for i in range(len(x)):
+        pred, sigma = model.online(torch.tensor(x[i:i+1]).float())
+        u = pred.detach().numpy()[0][0]
+        v = np.sqrt(sigma.detach().numpy()[0][0]) #standard deviation
+        #print(v)
+        y_pred.append(u)
+        y_pred_bottom.append(u - 2*v)
+        y_pred_top.append(u + 2*v)
+
+    #Plot predictions
     plt.figure(5)
+    x = x[5:]
+    y = y[5:]
+    y_pred = y_pred[5:]
+    y_pred_top = y_pred_top[5:]
+    y_pred_bottom = y_pred_bottom[5:]
     plt.plot(x, y, "black")
     plt.plot(x, y_pred, "blue")
+    plt.plot(x, y_pred_top, "red")
+    plt.plot(x, y_pred_bottom, "red")
     plt.title("Predictions from the Meta Learning Prior")
     plt.xlabel("x")
     plt.ylabel("y")
