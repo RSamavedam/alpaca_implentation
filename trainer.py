@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import time
+import os
 
 class ALPaCA(torch.nn.Module):
     def __init__(self):
@@ -70,7 +72,7 @@ def loss_fn(preds, sigma_x, actual_values):
     #sigma_x is (n_batches, len_train_batch, len_train_batch)
     #actual_values is (n_batches, len_train_batch, 1)
     difference = preds - actual_values
-    log_gaussian = torch.matmul(preds.transpose(1, 2), torch.matmul(torch.inverse(sigma_x), preds)) #(n_batches, 1, 1)
+    log_gaussian = torch.matmul(difference.transpose(1, 2), torch.matmul(torch.inverse(sigma_x), difference)) #(n_batches, 1, 1)
     #print(log_gaussian)
     #print(sigma_x)
     log_det = torch.log(torch.linalg.det(sigma_x))
@@ -88,16 +90,16 @@ if __name__ == "__main__":
     Y_context = []
     x_train = []
     y_train = []
-    n_batches = 6
-    len_context = 15
+    n_batches = 3
+    len_context = 20
     len_train_batch = 1 #in practice, exceeding 4 results in sigma_x being singular (should I use identity matrix instead of 1?)
     #probably is a better way to implement next 9 lines but oh well
-    phases = np.linspace(0, 1, n_batches)
-    for i in range(1, n_batches+1):
+    freqs = np.linspace(0.5, 0.5, 2*n_batches)
+    for i in range(1, 2*n_batches + 1):
         X_context.append(torch.linspace(0, 1, len_context))
-        Y_context.append(torch.sin(2 * np.pi * torch.linspace(0, 1, len_context) + np.pi*phases[i-1]))
+        Y_context.append(torch.sin(freqs[i-1] * 2 * np.pi * torch.linspace(0, 1, len_context)))
         x_train.append(torch.linspace(1, 1.2, len_train_batch))
-        y_train.append(torch.sin(2 * np.pi * torch.linspace(1, 1.2, len_train_batch) + np.pi*phases[i-1]))
+        y_train.append(torch.sin(freqs[i-1] * 2 * np.pi * torch.linspace(1, 1.2, len_train_batch)))
     X_context = torch.stack(X_context).unsqueeze(2)
     Y_context = torch.stack(Y_context).unsqueeze(2)
     x_train = torch.stack(x_train).unsqueeze(2)
@@ -110,10 +112,10 @@ if __name__ == "__main__":
     print(y_train.shape)
 
     #offline meta learning
-    max_train_iter = 100 #for len_train_batch=1 doing more iterations than this doesn't change things in terms of loss
+    max_train_iter = 500 #for len_train_batch=1 doing more iterations than this doesn't change things in terms of loss
     optimizer = torch.optim.Adam(model.parameters())
     model.train()
-    perturb_training_data = False
+    perturb_training_data = True
     training_losses_offline = []
     average_variances = []
     for iter_count in range(max_train_iter):
@@ -130,10 +132,49 @@ if __name__ == "__main__":
 
         #for backpropping on different examples
         if perturb_training_data:
-            perturbation = torch.rand((n_batches, len_train_batch, 1)) * .1 #experiment with this factor
-            x_train = x_train + perturbation
-            for i in range(n_batches):
-                y_train[i] = torch.sin((i + 1) * x_train[i]) #can't think of a better way to do this
+            #x_train = []
+            y_train = []
+            Y_context = []
+            x_train = torch.rand((n_batches, len_train_batch, 1)) #experiment with this factor
+            X_context = torch.rand((n_batches, len_context, 1))
+            i = 0
+            for iter in np.random.randint(n_batches*2, size=n_batches):
+                y_train.append(torch.sin(freqs[iter] * 2 * np.pi * x_train[i]))#can't think of a better way to do this
+                Y_context.append(torch.sin(freqs[iter] * 2 * np.pi * X_context[i]))
+                i += 1
+            y_train = torch.stack(y_train)
+            Y_context = torch.stack(Y_context)
+            #print(x_train.shape)
+            #print(y_train.shape)
+            #raiseException()
+        if iter_count % 25 == 0:
+            plt.figure((iter_count/100)+1)
+            time.sleep(2)
+            #Online Part
+            #First want to see what the model returns when predicting over the interval (what the offline posterior parameters return)
+            model.start_online()
+            x = np.linspace(0, 1, 100)
+            y_top = []
+            y = []
+            y_bottom = []
+            for i in range(len(x)):
+                pred, sigma = model.online(torch.tensor(x[i:i+1]).float())
+                u = pred.detach().numpy()[0][0]
+                v = np.sqrt(sigma.detach().numpy()[0][0]) #standard deviation
+                y.append(u)
+                y_bottom.append(u - 2*v)
+                y_top.append(u + 2*v)
+
+            #Plot predictions with confidence interval
+            plt.plot(x, y)
+            plt.plot(x, y_bottom, "r")
+            plt.plot(x, y_top, "r")
+            plt.title(f"Predictions from the Meta Learning Prior with 95% confidence interval : {training_losses_offline[-1]}")
+            plt.xlabel("x")
+            plt.ylabel("y")
+            plt.savefig("Prior_Confidence")
+            plt.close()
+
 
     #Plot training loss vs time
     x = np.linspace(1, len(training_losses_offline), len(training_losses_offline))
@@ -188,44 +229,56 @@ if __name__ == "__main__":
 
 
     #Now want to fit to a specific sinusoid with our meta learning prior
-    x = np.linspace(0, 1, 100)
-    y = np.sin(2*np.pi*x + 0.5*np.pi)
+    test_freq = 0.5
+    #x = np.linspace(0, 1, 100)
+    x = np.random.rand(75)
+    x_copy = x[:]
+    y = np.sin(test_freq * 2 * np.pi*x)
+    y_copy = y[:]
     y_pred_top = []
     y_pred = []
     y_pred_bottom = []
-    for i in range(len(x)):
-        pred, sigma = model.online(torch.tensor(x[i:i+1]).float(), update=True, y=torch.tensor(y[i:i+1]).float())
-        u = pred.detach().numpy()[0][0]
-        v = np.sqrt(sigma.detach().numpy()[0][0]) #standard deviation
-        #print(v)
-        y_pred.append(u)
-        y_pred_bottom.append(u - 2*v)
-        y_pred_top.append(u + 2*v)
 
-    y_pred = []
-    y_pred_bottom = []
-    y_pred_top = []
-    for i in range(len(x)):
-        pred, sigma = model.online(torch.tensor(x[i:i+1]).float())
-        u = pred.detach().numpy()[0][0]
-        v = np.sqrt(sigma.detach().numpy()[0][0]) #standard deviation
-        #print(v)
-        y_pred.append(u)
-        y_pred_bottom.append(u - 2*v)
-        y_pred_top.append(u + 2*v)
+    for epoch in range(1):
+        plt.figure(epoch+5)
+        time.sleep(2)
+        for i in range(len(x)):
+            pred, sigma = model.online(torch.tensor(x[i:i+1]).float(), update=True, y=torch.tensor(y[i:i+1]).float())
+            #u = pred.detach().numpy()[0][0]
+            #v = np.sqrt(sigma.detach().numpy()[0][0]) #standard deviation
+            #print(v)
+            #y_pred.append(u)
+            #y_pred_bottom.append(u - 2*v)
+            #y_pred_top.append(u + 2*v)
 
-    #Plot predictions
-    plt.figure(5)
-    x = x[5:]
-    y = y[5:]
-    y_pred = y_pred[5:]
-    y_pred_top = y_pred_top[5:]
-    y_pred_bottom = y_pred_bottom[5:]
-    plt.plot(x, y, "black")
-    plt.plot(x, y_pred, "blue")
-    plt.plot(x, y_pred_top, "red")
-    plt.plot(x, y_pred_bottom, "red")
-    plt.title("Predictions from the Meta Learning Prior")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.savefig("Learned_Sinusoid")
+        y_pred = []
+        y_pred_bottom = []
+        y_pred_top = []
+        x = x_copy[:]
+        y = y_copy[:]
+        for i in range(len(x)):
+            pred, sigma = model.online(torch.tensor(x[i:i+1]).float())
+            u = pred.detach().numpy()[0][0]
+            v = np.sqrt(sigma.detach().numpy()[0][0]) #standard deviation
+            #print(v)
+            y_pred.append(u)
+            y_pred_bottom.append(u - 2*v)
+            y_pred_top.append(u + 2*v)
+
+        #Plot predictions
+        #plt.figure(5)
+        x = x[5:]
+        y = y[5:]
+        y_pred = y_pred[5:]
+        y_pred_top = y_pred_top[5:]
+        y_pred_bottom = y_pred_bottom[5:]
+        #plt.plot(x, y, "black")
+        plt.scatter(x, y_pred)
+        plt.scatter(x, y_pred_top, c="r")
+        plt.scatter(x, y_pred_bottom, c="r")
+        plt.scatter(x, y)
+        plt.title("Predictions from the Meta Learning Prior")
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.savefig("Learned_Sinusoid")
+        plt.close()
